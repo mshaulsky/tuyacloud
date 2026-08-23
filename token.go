@@ -8,14 +8,6 @@ import (
 	"time"
 )
 
-// token is the payload of the token endpoint.
-type token struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpireTime   int64  `json:"expire_time"` // lifetime in seconds, not a deadline
-	UID          string `json:"uid"`
-}
-
 // Error codes the platform returns often enough to be worth matching. Compare
 // them against APIError.Code with errors.As.
 const (
@@ -64,7 +56,7 @@ func (c *Client) refreshToken(ctx context.Context, stale string) (string, error)
 // endpoint: in simple mode the credentials alone are enough, and this avoids a
 // second expiry to track.
 func (c *Client) fetchToken(ctx context.Context) (string, error) {
-	var t token
+	var t Token
 	query := url.Values{"grant_type": []string{"1"}}
 	if err := c.call(ctx, http.MethodGet, tokenPath, query, nil, "", &t); err != nil {
 		return "", fmt.Errorf("tuyacloud: obtain access token: %w", err)
@@ -75,7 +67,6 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 
 	c.token = t.AccessToken
 	c.tokenExp = now().Add(time.Duration(t.ExpireTime) * time.Second).Add(-tokenLeeway)
-	c.uid = t.UID
 	return c.token, nil
 }
 

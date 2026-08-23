@@ -73,7 +73,8 @@ expire, and replaced automatically if the platform rejects one mid-flight. A
 
 The API is not open to app accounts directly — you need a cloud project:
 
-1. Register at [iot.tuya.com](https://iot.tuya.com) and create a **Cloud
+1. Register at [platform.tuya.com](https://platform.tuya.com) (the former
+   iot.tuya.com) and create a **Cloud
    project** (development method: *Smart Home*).
 2. In the project, open **Devices → Link Tuya App Account** and link the
    account your devices are already in, by scanning the QR code from the Smart
@@ -150,11 +151,17 @@ if errors.As(err, &apiErr) && apiErr.Code == tuyacloud.CodeDataNotExist {
 
 | Call | Endpoint |
 |---|---|
-| `Devices` / `DevicesByUser` | `GET /v1.0/users/{uid}/devices` |
+| `Devices` | `GET /v1.0/iot-01/associated-users/devices` (paginated) |
+| `DevicesByUser` | `GET /v1.3/iot-03/devices?source_type=tuyaUser` (paginated) |
 | `Device` | `GET /v1.0/devices/{id}` |
 | `DeviceStatus` | `GET /v1.0/devices/{id}/status` |
+| `DevicesStatus` | `GET /v1.0/iot-03/devices/status` (batched by 20) |
 | `Specification` | `GET /v1.0/devices/{id}/specifications` |
 | `SendCommands` | `POST /v1.0/devices/{id}/commands` |
+
+The legacy device listing (`/v1.0/users/{uid}/devices`) is deliberately not
+used: newly created projects get `1106 permission deny` from it no matter what
+is authorised.
 
 Anything else is one line away — `Get` and `Post` sign, send and decode an
 arbitrary path, so an unwrapped endpoint needs no changes to this package:
@@ -180,7 +187,7 @@ same values while burning quota.
 
 ```sh
 go test ./...        # no credentials or network required
-go generate ./...    # regenerate the mock after changing interfaces.go
+go generate ./...    # regenerate the mock and the wire models
 golangci-lint run    # same configuration CI uses
 ```
 
@@ -191,6 +198,14 @@ checks the output against vectors produced by an independent transcription of
 [Tuya's documented algorithm](https://developer.tuya.com/en/docs/iot/new-singnature?id=Kbw0q34cs2e5g),
 so a match means this package agrees with the specification and not merely with
 itself.
+
+The wire models in `types_gen.go` are generated (via
+[oapi-codegen](https://github.com/oapi-codegen/oapi-codegen)) from
+[`openapi.yaml`](openapi.yaml) — a hand-maintained OpenAPI description of the
+Tuya endpoints this package uses, kept because Tuya publishes no
+machine-readable specification of its own. To model a new endpoint, describe it
+in the spec and run `go generate`; the transport in `client.go` needs no
+changes.
 
 ## License
 

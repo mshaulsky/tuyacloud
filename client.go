@@ -24,10 +24,9 @@ type Client struct {
 	host      string
 	http      Doer
 
-	mu       sync.Mutex // guards the cached token and the user ID that came with it
+	mu       sync.Mutex // guards the cached token
 	token    string
 	tokenExp time.Time
-	uid      string
 }
 
 const (

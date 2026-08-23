@@ -1,0 +1,14 @@
+# Configuration for generating the wire models from openapi.yaml.
+# Only the component schemas are generated: the transport (signing, tokens,
+# retries, pagination) is hand-written in this package, so the per-operation
+# parameter and body types are excluded via their tag.
+package: tuyacloud
+output: types_gen.go
+generate:
+  models: true
+output-options:
+  exclude-tags: [tuya]
+  # Keep every component schema even though the operations are excluded.
+  skip-prune: true
+  # Optional fields decode into zero values rather than pointers.
+  prefer-skip-optional-pointer: true

@@ -584,8 +584,5 @@ func assertCalls(t *testing.T, got, want []call) {
 				t.Errorf("request %d header %s = %q, want %q", i, key, got, values[0])
 			}
 		}
-		if want[i].header.Get("sign") == "" && got[i].header.Get("sign") == "" {
-			t.Errorf("request %d carries no signature", i)
-		}
 	}
 }

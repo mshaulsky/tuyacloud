@@ -1,0 +1,474 @@
+openapi: 3.0.3
+
+info:
+  title: Tuya Cloud OpenAPI (subset)
+  version: 0.1.0
+  description: |
+    The subset of the Tuya Cloud (IoT Core) OpenAPI that the tuyacloud Go
+    client uses. Tuya publishes no machine-readable specification, so this
+    file is maintained by hand from the official documentation and verified
+    against the live platform. It is the source of truth for the wire models:
+    `types_gen.go` is generated from it (see the Development section of the
+    README), and the hand-written transport in client.go does the rest.
+
+    Authentication is Tuya's HMAC-SHA256 request signing — client_id, t,
+    nonce, sign and access_token headers computed over the method, body
+    digest and canonical URL — which OpenAPI cannot express. See sign.go for
+    the implementation and its specification-vector tests.
+
+    Every response is wrapped in a common envelope; the interesting payload
+    is always in `result`. The envelope itself is decoded by the transport,
+    so only the `result` schemas are generated as models.
+
+servers:
+  - url: https://openapi.tuyaeu.com
+    description: Central Europe (also Africa, Middle East and Central Asia)
+  - url: https://openapi.tuyaus.com
+    description: Western America (and anything unlisted)
+  - url: https://openapi.tuyacn.com
+    description: China
+  - url: https://openapi.tuyain.com
+    description: India
+
+paths:
+  /v1.0/token:
+    get:
+      tags: [tuya]
+      operationId: getToken
+      summary: Obtain an access token (simple mode)
+      description: |
+        Simple-mode authentication: the project credentials alone are
+        exchanged for a project access token. Unlike every other call, the
+        request is signed without an access token.
+      parameters:
+        - name: grant_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: ["1"]
+          description: 1 selects simple mode.
+      responses:
+        "200":
+          description: The token and its lifetime.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    $ref: "#/components/schemas/Token"
+
+  /v1.0/iot-01/associated-users/devices:
+    get:
+      tags: [tuya]
+      operationId: listAssociatedUsersDevices
+      summary: List the devices of every linked app account
+      description: |
+        The discovery call behind Client.Devices. The legacy endpoint for the
+        same purpose (/v1.0/users/{uid}/devices) answers 1106 "permission
+        deny" for newly created projects no matter what is authorised, so
+        this listing is used instead.
+      parameters:
+        - name: size
+          in: query
+          schema: { type: integer, default: 20 }
+          description: Page size.
+        - name: last_row_key
+          in: query
+          schema: { type: string }
+          description: Pagination cursor from the previous page.
+      responses:
+        "200":
+          description: One page of devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    $ref: "#/components/schemas/AssociatedDevicesPage"
+
+  /v1.3/iot-03/devices:
+    get:
+      tags: [tuya]
+      operationId: listDevices
+      summary: List devices by owner
+      description: The call behind Client.DevicesByUser.
+      parameters:
+        - name: source_type
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [tuyaUser]
+          description: The dimension to list by; only tuyaUser is used here.
+        - name: source_id
+          in: query
+          required: true
+          schema: { type: string }
+          description: The app account (user) ID.
+        - name: page_size
+          in: query
+          schema: { type: integer, default: 20, maximum: 200 }
+        - name: last_row_key
+          in: query
+          schema: { type: string }
+          description: Pagination cursor from the previous page.
+      responses:
+        "200":
+          description: One page of devices.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    $ref: "#/components/schemas/UserDevicesPage"
+
+  /v1.0/devices/{device_id}:
+    get:
+      tags: [tuya]
+      operationId: getDevice
+      summary: Get one device, including its current status
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: The device ID, as listed by the device listings.
+      responses:
+        "200":
+          description: The device.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    $ref: "#/components/schemas/Device"
+
+  /v1.0/devices/{device_id}/status:
+    get:
+      tags: [tuya]
+      operationId: getDeviceStatus
+      summary: Read the current data points of a device
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: The device ID, as listed by the device listings.
+      responses:
+        "200":
+          description: The reported data points.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DataPoint"
+
+  /v1.0/iot-03/devices/status:
+    get:
+      tags: [tuya]
+      operationId: getDevicesStatus
+      summary: Read the current data points of up to 20 devices at once
+      description: |
+        The batch counterpart of getDeviceStatus and the preferred call for a
+        polling loop: one request covers a whole dashboard. The archived
+        legacy path (/v1.0/devices/status) is deliberately not used.
+      parameters:
+        - name: device_ids
+          in: query
+          required: true
+          schema: { type: string }
+          description: Comma-separated device IDs, at most 20 per request.
+      responses:
+        "200":
+          description: The reported data points of every requested device.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DeviceStatusEntry"
+
+  /v1.0/devices/{device_id}/specifications:
+    get:
+      tags: [tuya]
+      operationId: getDeviceSpecification
+      summary: Describe what a device can report and accept
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: The device ID, as listed by the device listings.
+      responses:
+        "200":
+          description: The product specification.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    $ref: "#/components/schemas/Specification"
+
+  /v1.0/devices/{device_id}/commands:
+    post:
+      tags: [tuya]
+      operationId: sendDeviceCommands
+      summary: Issue instructions to a device
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: The device ID, as listed by the device listings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandsRequest"
+      responses:
+        "200":
+          description: Whether the commands were accepted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result: { type: boolean }
+
+components:
+  schemas:
+    Token:
+      type: object
+      description: The payload of the token endpoint.
+      # uid is only present when an app account is linked to the project.
+      required: [access_token, refresh_token, expire_time]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expire_time:
+          type: integer
+          format: int64
+          description: Token lifetime in seconds — not a deadline.
+        uid:
+          type: string
+          x-go-name: UID
+          description: The app account linked to the project, when there is one.
+
+    Device:
+      type: object
+      description: |
+        One device registered to the cloud project. Sensors behind a gateway —
+        Bluetooth or Zigbee — appear as ordinary devices with sub set.
+      # Only the fields every listing sends are required: the iot-03 listing
+      # omits status and uid, and gateway sub-devices leave ip and local_key
+      # empty.
+      required: [id, name, category, online, sub]
+      properties:
+        id:
+          type: string
+          x-go-name: ID
+        name:
+          type: string
+        category:
+          type: string
+          description: Product category code, e.g. wsdcg for a climate sensor.
+        product_id:
+          type: string
+          x-go-name: ProductID
+        product_name:
+          type: string
+        online:
+          type: boolean
+        sub:
+          type: boolean
+          description: Reached through a gateway rather than directly.
+        uid:
+          type: string
+          x-go-name: UID
+          description: The app account owning the device.
+        local_key:
+          type: string
+        ip:
+          type: string
+          x-go-name: IP
+        time_zone:
+          type: string
+        active_time:
+          type: integer
+          format: int64
+        update_time:
+          type: integer
+          format: int64
+        status:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataPoint"
+          x-go-type: Status
+          description: Current data points, when the endpoint includes them.
+
+    DataPoint:
+      type: object
+      description: |
+        One reported value. Tuya types values per product, so the value stays
+        raw JSON until the caller asks for a concrete type via the DataPoint
+        helpers (Int, Float, Bool, Text).
+      required: [code, value]
+      properties:
+        code:
+          type: string
+        value:
+          description: The raw JSON value; integer, boolean, string or object.
+          x-go-type: json.RawMessage
+
+    DeviceStatusEntry:
+      type: object
+      description: The status of one device in the batch status listing.
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          x-go-name: ID
+        status:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataPoint"
+          x-go-type: Status
+
+    Specification:
+      type: object
+      description: |
+        The data points a product can report and accept, with the metadata
+        needed to interpret them.
+      required: [category, functions, status]
+      properties:
+        category:
+          type: string
+        functions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Definition"
+          description: Writable data points, via sendDeviceCommands.
+        status:
+          type: array
+          items:
+            $ref: "#/components/schemas/Definition"
+          description: Readable data points, via getDeviceStatus.
+
+    Definition:
+      type: object
+      description: One data point of a product.
+      required: [code, type, values]
+      properties:
+        code:
+          type: string
+        type:
+          type: string
+          description: Integer, Boolean, Enum, String or Json.
+        values:
+          type: string
+          description: |
+            Type-specific constraints, themselves encoded as a JSON string.
+            Integer ones parse into Range, which carries the power-of-ten
+            scale turning raw readings into real units.
+
+    Command:
+      type: object
+      description: One instruction for a device.
+      required: [code, value]
+      properties:
+        code:
+          type: string
+        value:
+          description: The value to apply; its type is set by the data point.
+
+    CommandsRequest:
+      type: object
+      description: The body of sendDeviceCommands.
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          items:
+            $ref: "#/components/schemas/Command"
+
+    AssociatedDevicesPage:
+      type: object
+      description: One page of the linked-account device listing.
+      required: [devices, has_more]
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        has_more:
+          type: boolean
+        last_row_key:
+          type: string
+          description: Cursor for the next page; absent on the last one.
+        total:
+          type: integer
+
+    UserDevicesPage:
+      type: object
+      description: One page of the by-owner device listing.
+      required: [list, has_more]
+      properties:
+        list:
+          type: array
+          items:
+            $ref: "#/components/schemas/Device"
+        has_more:
+          type: boolean
+        last_row_key:
+          type: string
+          description: Cursor for the next page; absent on the last one.
+        total:
+          type: integer

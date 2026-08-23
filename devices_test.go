@@ -2,12 +2,25 @@ package tuyacloud
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
 func TestClientDevices(t *testing.T) {
 	pinClock(t)
+
+	// pagedHandler serves two pages: the second only when the client passes
+	// the last_row_key from the first back in.
+	pagedHandler := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("last_row_key") == "page2" {
+			_, _ = io.WriteString(w, `{"success":true,"result":{"has_more":false,"devices":[{"id":"dev2","name":"Kettle","category":"kg"}]}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"success":true,"result":{"has_more":true,"last_row_key":"page2","devices":[{"id":"dev1","name":"Bedroom sensor","category":"wsdcg","online":true,"sub":true}]}}`)
+	}
 
 	tests := []struct {
 		name      string
@@ -17,32 +30,49 @@ func TestClientDevices(t *testing.T) {
 		wantErr   string
 	}{
 		{
-			name: "lists the devices of the linked account",
+			name: "lists the devices of the linked accounts",
 			platform: &platform{
-				tokenUID: "user42",
-				handler: jsonHandler(`{"success":true,"result":[
-					{"id":"dev1","name":"Bedroom sensor","category":"wsdcg","online":true,"sub":true},
-					{"id":"dev2","name":"Kettle","category":"kg","online":false}
-				]}`),
+				handler: jsonHandler(`{"success":true,"result":{"has_more":false,"devices":[
+					{"id":"dev1","name":"Bedroom sensor","category":"wsdcg","online":true,"sub":true,"uid":"user42"},
+					{"id":"dev2","name":"Kettle","category":"kg","online":false,"uid":"user42"}
+				]}}`),
 			},
 			want: []Device{
 				{ID: "dev1", Name: "Bedroom sensor", Category: "wsdcg", Online: true, Sub: true},
 				{ID: "dev2", Name: "Kettle", Category: "kg"},
 			},
-			wantCalls: []call{{method: http.MethodGet, path: "/v1.0/users/user42/devices"}},
+			wantCalls: []call{{
+				method: http.MethodGet,
+				path:   "/v1.0/iot-01/associated-users/devices",
+				query:  "size=50",
+			}},
 		},
 		{
-			name:     "a token without a user id explains what to do",
-			platform: &platform{tokenUID: ""},
-			wantErr:  "carries no user ID",
-		},
-		{
-			name: "an api error is wrapped with the user",
-			platform: &platform{
-				tokenUID: "user42",
-				handler:  jsonHandler(`{"success":false,"code":1106,"msg":"permission deny"}`),
+			name:     "pages are walked until has_more clears",
+			platform: &platform{handler: pagedHandler},
+			want: []Device{
+				{ID: "dev1", Name: "Bedroom sensor", Category: "wsdcg", Online: true, Sub: true},
+				{ID: "dev2", Name: "Kettle", Category: "kg"},
 			},
-			wantErr: "list devices of user user42",
+			wantCalls: []call{
+				{method: http.MethodGet, path: "/v1.0/iot-01/associated-users/devices", query: "size=50"},
+				{method: http.MethodGet, path: "/v1.0/iot-01/associated-users/devices", query: "last_row_key=page2&size=50"},
+			},
+		},
+		{
+			name:     "a cursor that does not advance is an error, not a spin",
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":{"has_more":true,"last_row_key":"stuck","devices":[{"id":"dev1"}]}}`)},
+			wantErr:  `repeated page cursor "stuck"`,
+		},
+		{
+			name:     "an empty project lists no devices",
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":{"has_more":false,"devices":[]}}`)},
+			want:     []Device{},
+		},
+		{
+			name:     "an api error is reported",
+			platform: &platform{handler: jsonHandler(`{"success":false,"code":1106,"msg":"permission deny"}`)},
+			wantErr:  "list devices: tuya api /v1.0/iot-01/associated-users/devices: code 1106",
 		},
 	}
 
@@ -72,21 +102,31 @@ func TestClientDevicesByUser(t *testing.T) {
 		wantErr   string
 	}{
 		{
-			name:      "requests the devices of the given user",
-			uid:       "user7",
-			platform:  &platform{handler: jsonHandler(`{"success":true,"result":[{"id":"dev1"}]}`)},
-			want:      []Device{{ID: "dev1"}},
-			wantCalls: []call{{method: http.MethodGet, path: "/v1.0/users/user7/devices"}},
+			name:     "requests the devices of the given user",
+			uid:      "user7",
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":{"has_more":false,"list":[{"id":"dev1"}]}}`)},
+			want:     []Device{{ID: "dev1"}},
+			wantCalls: []call{{
+				method: http.MethodGet,
+				path:   "/v1.3/iot-03/devices",
+				query:  "page_size=75&source_id=user7&source_type=tuyaUser",
+			}},
 		},
 		{
-			name:     "a user id with a slash stays one path segment",
-			uid:      "a/b",
-			platform: &platform{handler: jsonHandler(`{"success":true,"result":[]}`)},
+			name:     "a user id with reserved characters survives the query encoding",
+			uid:      "a/b&c",
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":{"has_more":false,"list":[]}}`)},
 			want:     []Device{},
 			wantCalls: []call{{
-				method:  http.MethodGet,
-				escaped: "/v1.0/users/a%2Fb/devices",
+				method: http.MethodGet,
+				query:  "page_size=75&source_id=a%2Fb%26c&source_type=tuyaUser",
 			}},
+		},
+		{
+			name:     "a cursor that does not advance is an error, not a spin",
+			uid:      "user7",
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":{"has_more":true,"last_row_key":"stuck","list":[{"id":"dev1"}]}}`)},
+			wantErr:  `repeated page cursor "stuck"`,
 		},
 		{
 			name:    "an empty user id is refused",
@@ -200,6 +240,90 @@ func TestClientDeviceStatus(t *testing.T) {
 			if tt.wantCalls != nil {
 				assertCalls(t, p.requests(false), tt.wantCalls)
 			}
+		})
+	}
+}
+
+func TestClientDevicesStatus(t *testing.T) {
+	pinClock(t)
+
+	// echoHandler answers with one entry per requested device, so the test
+	// sees exactly which IDs each request carried.
+	echoHandler := func(w http.ResponseWriter, r *http.Request) {
+		entries := make([]string, 0, maxStatusBatch)
+		for _, id := range strings.Split(r.URL.Query().Get("device_ids"), ",") {
+			entries = append(entries, fmt.Sprintf(`{"id":%q,"status":[{"code":"va_temperature","value":235}]}`, id))
+		}
+		_, _ = io.WriteString(w, `{"success":true,"result":[`+strings.Join(entries, ",")+`]}`)
+	}
+
+	manyIDs := make([]string, 25)
+	for i := range manyIDs {
+		manyIDs[i] = fmt.Sprintf("dev%02d", i)
+	}
+
+	tests := []struct {
+		name      string
+		ids       []string
+		platform  *platform
+		wantIDs   []string
+		wantCalls []call
+		wantErr   string
+	}{
+		{
+			name: "reads several devices in one request",
+			ids:  []string{"a", "b"},
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":[
+				{"id":"a","status":[{"code":"va_temperature","value":235}]},
+				{"id":"b","status":[{"code":"va_humidity","value":48}]}
+			]}`)},
+			wantIDs: []string{"a", "b"},
+			wantCalls: []call{{
+				method: http.MethodGet,
+				path:   "/v1.0/iot-03/devices/status",
+				query:  "device_ids=a%2Cb",
+			}},
+		},
+		{
+			name:     "more than twenty devices are fetched in chunks",
+			ids:      manyIDs,
+			platform: &platform{handler: echoHandler},
+			wantIDs:  manyIDs,
+			wantCalls: []call{
+				{method: http.MethodGet, path: "/v1.0/iot-03/devices/status", query: "device_ids=" + strings.Join(manyIDs[:20], "%2C")},
+				{method: http.MethodGet, path: "/v1.0/iot-03/devices/status", query: "device_ids=" + strings.Join(manyIDs[20:], "%2C")},
+			},
+		},
+		{
+			name:    "no device ids is refused before any request",
+			ids:     nil,
+			wantErr: "at least one device ID is required",
+		},
+		{
+			name:     "a failure reports the batch size",
+			ids:      []string{"a", "b", "c"},
+			platform: &platform{handler: jsonHandler(`{"success":false,"code":1106,"msg":"permission deny"}`)},
+			wantErr:  "get status of 3 device(s)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, p := newPlatform(t, tt.platform)
+
+			got, err := c.DevicesStatus(t.Context(), tt.ids...)
+			if !checkErr(t, err, tt.wantErr) {
+				return
+			}
+			if len(got) != len(tt.wantIDs) {
+				t.Fatalf("got %d devices, want %d", len(got), len(tt.wantIDs))
+			}
+			for _, id := range tt.wantIDs {
+				if _, ok := got[id]; !ok {
+					t.Errorf("device %s is missing from the result", id)
+				}
+			}
+			assertCalls(t, p.requests(false), tt.wantCalls)
 		})
 	}
 }

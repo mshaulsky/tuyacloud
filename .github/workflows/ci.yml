@@ -20,7 +20,7 @@ jobs:
         with:
           version: v2.12.2
 
-      - name: Check generated mocks and module files are current
+      - name: Check generated code and module files are current
         run: |
           go generate ./...
           go mod tidy

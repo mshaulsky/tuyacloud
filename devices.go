@@ -7,52 +7,20 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"strings"
 )
 
-// Device describes one device registered to the cloud project. Sensors behind
-// a gateway — Bluetooth or Zigbee — appear as ordinary devices with Sub set.
-type Device struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Category    string `json:"category"`
-	ProductID   string `json:"product_id"`
-	ProductName string `json:"product_name"`
-	Online      bool   `json:"online"`
-	Sub         bool   `json:"sub"` // reached through a gateway rather than directly
-	LocalKey    string `json:"local_key"`
-	IP          string `json:"ip"`
-	TimeZone    string `json:"time_zone"`
-	ActiveTime  int64  `json:"active_time"`
-	UpdateTime  int64  `json:"update_time"`
-	Status      Status `json:"status"`
-}
+// The wire models — Device, DataPoint, Specification, Definition, Command,
+// Token and the page wrappers — are generated into types_gen.go from
+// openapi.yaml, the package's specification of the Tuya endpoints it uses.
+// This file adds the behaviour on top of them.
 
 // Status is a set of data points, the code/value pairs a device reports.
 type Status []DataPoint
 
-// DataPoint is one reported value. Tuya types values per product, so the value
-// stays raw JSON until the caller asks for a concrete type.
-type DataPoint struct {
-	Code  string          `json:"code"`
-	Value json.RawMessage `json:"value"`
-}
-
-// Specification lists the data points a product can report and accept, with
-// the metadata needed to interpret them.
-type Specification struct {
-	Category  string       `json:"category"`
-	Functions []Definition `json:"functions"` // writable, via SendCommands
-	Status    []Definition `json:"status"`    // readable, via DeviceStatus
-}
-
-// Definition describes one data point of a product.
-type Definition struct {
-	Code string `json:"code"`
-	Type string `json:"type"` // Integer, Boolean, Enum, String or Json
-	// Values holds the type-specific constraints, itself encoded as a JSON
-	// string. Numeric ones are easier to read through Range.
-	Values string `json:"values"`
-}
+// maxStatusBatch is the largest number of devices the platform reads in one
+// batch status request.
+const maxStatusBatch = 20
 
 // Range is the constraint set of an Integer data point. Values are reported as
 // integers scaled by a power of ten: a temperature of 23.5 °C arrives as 235
@@ -65,34 +33,63 @@ type Range struct {
 	Step  float64 `json:"step"`
 }
 
-// Command is one instruction for a device.
-type Command struct {
-	Code  string `json:"code"`
-	Value any    `json:"value"`
-}
-
-// Devices lists every device linked to the app account behind the cloud
-// project. It is the discovery call: run it once to learn the device IDs, then
-// poll those directly.
+// Devices lists every device of every app account linked to the cloud project.
+// It is the discovery call: run it once to learn the device IDs, then poll
+// those directly.
+//
+// The legacy endpoint for this (/v1.0/users/{uid}/devices) is closed to newly
+// created projects — it answers 1106 "permission deny" even with every service
+// authorised — so this walks the associated-users listing instead, the same
+// route the platform still grants.
 func (c *Client) Devices(ctx context.Context) ([]Device, error) {
-	uid, err := c.ensureUID(ctx)
-	if err != nil {
-		return nil, err
+	var all []Device
+	query := url.Values{"size": {"50"}}
+	for {
+		var page AssociatedDevicesPage
+		if err := c.Get(ctx, "/v1.0/iot-01/associated-users/devices", query, &page); err != nil {
+			return nil, fmt.Errorf("tuyacloud: list devices: %w", err)
+		}
+		all = append(all, page.Devices...)
+		if !page.HasMore || page.LastRowKey == "" {
+			return all, nil
+		}
+		// A cursor that does not advance would loop forever on a buggy
+		// backend, bounded only by the caller's context.
+		if page.LastRowKey == query.Get("last_row_key") {
+			return nil, fmt.Errorf("tuyacloud: list devices: the platform repeated page cursor %q", page.LastRowKey)
+		}
+		query.Set("last_row_key", page.LastRowKey)
 	}
-	return c.DevicesByUser(ctx, uid)
 }
 
-// DevicesByUser lists the devices of one app user, for projects where the user
-// ID is known independently.
+// DevicesByUser lists the devices of one app user, for projects with several
+// linked accounts. The user ID is shown next to the linked account in the
+// platform console, and Devices reports it in each Device's UID; the listing
+// this method uses does not itself fill UID in.
 func (c *Client) DevicesByUser(ctx context.Context, uid string) ([]Device, error) {
 	if uid == "" {
 		return nil, errors.New("tuyacloud: user ID is required")
 	}
-	var devices []Device
-	if err := c.Get(ctx, "/v1.0/users/"+url.PathEscape(uid)+"/devices", nil, &devices); err != nil {
-		return nil, fmt.Errorf("tuyacloud: list devices of user %s: %w", uid, err)
+	var all []Device
+	query := url.Values{
+		"page_size":   {"75"},
+		"source_type": {"tuyaUser"},
+		"source_id":   {uid},
 	}
-	return devices, nil
+	for {
+		var page UserDevicesPage
+		if err := c.Get(ctx, "/v1.3/iot-03/devices", query, &page); err != nil {
+			return nil, fmt.Errorf("tuyacloud: list devices of user %s: %w", uid, err)
+		}
+		all = append(all, page.List...)
+		if !page.HasMore || page.LastRowKey == "" {
+			return all, nil
+		}
+		if page.LastRowKey == query.Get("last_row_key") {
+			return nil, fmt.Errorf("tuyacloud: list devices of user %s: the platform repeated page cursor %q", uid, page.LastRowKey)
+		}
+		query.Set("last_row_key", page.LastRowKey)
+	}
 }
 
 // Device fetches one device, including its current status.
@@ -114,6 +111,32 @@ func (c *Client) DeviceStatus(ctx context.Context, deviceID string) (Status, err
 	return s, nil
 }
 
+// DevicesStatus reads the current data points of several devices in one round
+// trip, keyed by device ID — the preferred call for a polling loop, where it
+// replaces a request per device with one per dashboard. The platform caps a
+// request at 20 devices, so longer lists are fetched in chunks transparently.
+//
+// An ID the platform does not recognise is simply absent from the map rather
+// than an error, so callers should mind the second return value of a lookup.
+func (c *Client) DevicesStatus(ctx context.Context, deviceIDs ...string) (map[string]Status, error) {
+	if len(deviceIDs) == 0 {
+		return nil, errors.New("tuyacloud: at least one device ID is required")
+	}
+	all := make(map[string]Status, len(deviceIDs))
+	for start := 0; start < len(deviceIDs); start += maxStatusBatch {
+		chunk := deviceIDs[start:min(start+maxStatusBatch, len(deviceIDs))]
+		var entries []DeviceStatusEntry
+		query := url.Values{"device_ids": {strings.Join(chunk, ",")}}
+		if err := c.Get(ctx, "/v1.0/iot-03/devices/status", query, &entries); err != nil {
+			return nil, fmt.Errorf("tuyacloud: get status of %d device(s): %w", len(chunk), err)
+		}
+		for _, e := range entries {
+			all[e.ID] = e.Status
+		}
+	}
+	return all, nil
+}
+
 // Specification describes what a device can report and accept. It rarely
 // changes, so fetch it once and cache it: it carries the scale needed to turn
 // raw integers into real units.
@@ -130,9 +153,7 @@ func (c *Client) SendCommands(ctx context.Context, deviceID string, commands ...
 	if len(commands) == 0 {
 		return errors.New("tuyacloud: at least one command is required")
 	}
-	body := struct {
-		Commands []Command `json:"commands"`
-	}{Commands: commands}
+	body := CommandsRequest{Commands: commands}
 	if err := c.Post(ctx, "/v1.0/devices/"+url.PathEscape(deviceID)+"/commands", body, nil); err != nil {
 		return fmt.Errorf("tuyacloud: send commands to device %s: %w", deviceID, err)
 	}
@@ -185,8 +206,8 @@ func (d DataPoint) Text() (string, error) {
 	return v, nil
 }
 
-// Get returns the definition with the given code, searching both the readable
-// and the writable data points.
+// Get returns the definition with the given code, searching the readable data
+// points first and the writable ones second.
 func (s Specification) Get(code string) (Definition, bool) {
 	for _, list := range [][]Definition{s.Status, s.Functions} {
 		for _, def := range list {
@@ -211,22 +232,4 @@ func (d Definition) Range() (Range, error) {
 // power-of-ten scale: Scaled(235) is 23.5 when Scale is 1.
 func (r Range) Scaled(raw int64) float64 {
 	return float64(raw) / math.Pow10(r.Scale)
-}
-
-// ensureUID returns the app user ID that came with the access token, fetching
-// a token first if necessary.
-func (c *Client) ensureUID(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.uid == "" || !now().Before(c.tokenExp) {
-		if _, err := c.fetchToken(ctx); err != nil {
-			return "", err
-		}
-	}
-	if c.uid == "" {
-		return "", errors.New("tuyacloud: the access token carries no user ID; " +
-			"link an app account to the cloud project, or call DevicesByUser with an explicit ID")
-	}
-	return c.uid, nil
 }

@@ -6,8 +6,8 @@
 //
 // # Credentials
 //
-// The access ID and access key come from a cloud project on the Tuya IoT
-// platform (https://iot.tuya.com), with the Smart Life or Tuya Smart app
+// The access ID and access key come from a cloud project on the Tuya
+// Developer Platform (https://platform.tuya.com), with the Smart Life or Tuya Smart app
 // account linked to it. Pick the [Region] of the data centre serving that
 // account; a mismatch fails authentication rather than falling back.
 //
@@ -30,3 +30,7 @@
 //		log.Printf("%s = %s", dp.Code, dp.Value)
 //	}
 package tuyacloud
+
+// The wire models in types_gen.go are generated from openapi.yaml, the
+// hand-maintained specification of the Tuya endpoints this package uses.
+//go:generate go tool oapi-codegen -config oapi-codegen.yaml openapi.yaml

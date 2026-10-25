@@ -156,6 +156,7 @@ if errors.As(err, &apiErr) && apiErr.Code == tuyacloud.CodeDataNotExist {
 | `Device` | `GET /v1.0/devices/{id}` |
 | `DeviceStatus` | `GET /v1.0/devices/{id}/status` |
 | `DevicesStatus` | `GET /v1.0/iot-03/devices/status` (batched by 20) |
+| `ShadowProperties` | `GET /v2.0/cloud/thing/{id}/shadow/properties` (with report times) |
 | `Specification` | `GET /v1.0/devices/{id}/specifications` |
 | `SendCommands` | `POST /v1.0/devices/{id}/commands` |
 
@@ -181,7 +182,8 @@ For real-time events, Tuya's `tuya-pulsar-sdk-go` still works alongside this.
 Tuya's free tier is generous for a home setup but not unlimited. Poll on the
 order of **once a minute per device**, not once a second — battery-powered
 sensors only report every few minutes anyway, so faster polling returns the
-same values while burning quota.
+same values while burning quota. `ShadowProperties` costs one request per
+device, so fetch it less often than the batched status.
 
 ## Development
 

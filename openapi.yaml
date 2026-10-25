@@ -250,6 +250,35 @@ paths:
                   result:
                     $ref: "#/components/schemas/Specification"
 
+  /v2.0/cloud/thing/{device_id}/shadow/properties:
+    get:
+      tags: [tuya]
+      operationId: getShadowProperties
+      summary: Read every data point of a device with the time it was reported
+      description: |
+        The device shadow speaks the product's own data-point codes, where the
+        status calls speak Tuya's standard instruction set.
+      parameters:
+        - name: device_id
+          in: path
+          required: true
+          schema: { type: string }
+          description: The device ID, as listed by the device listings.
+      responses:
+        "200":
+          description: The shadow properties.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  code: { type: integer }
+                  msg: { type: string }
+                  t: { type: integer, format: int64 }
+                  result:
+                    $ref: "#/components/schemas/ShadowProperties"
+
   /v1.0/devices/{device_id}/commands:
     post:
       tags: [tuya]
@@ -381,6 +410,42 @@ components:
           items:
             $ref: "#/components/schemas/DataPoint"
           x-go-type: Status
+
+    ShadowProperties:
+      type: object
+      description: The payload of getShadowProperties.
+      required: [properties]
+      properties:
+        properties:
+          type: array
+          items:
+            $ref: "#/components/schemas/Property"
+
+    Property:
+      type: object
+      description: One data point of the device shadow, with the time it was last reported.
+      required: [code, custom_name, dp_id, time, type, value]
+      properties:
+        code:
+          type: string
+          description: The product's own data-point code.
+        custom_name:
+          type: string
+          description: The name the user gave the data point, often empty.
+        dp_id:
+          type: integer
+          x-go-name: DpID
+          description: The numeric data-point ID.
+        time:
+          type: integer
+          format: int64
+          description: When the value was last reported, in milliseconds since the Unix epoch.
+        type:
+          type: string
+          description: One of value, enum, bool, string, raw or bitmap.
+        value:
+          description: The raw JSON value; number, boolean or string.
+          x-go-type: json.RawMessage
 
     Specification:
       type: object

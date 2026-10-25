@@ -86,6 +86,32 @@ type DeviceStatusEntry struct {
 	Status Status `json:"status"`
 }
 
+// Property One data point of the device shadow, with the time it was last reported.
+type Property struct {
+	// Code The product's own data-point code.
+	Code string `json:"code"`
+
+	// CustomName The name the user gave the data point, often empty.
+	CustomName string `json:"custom_name"`
+
+	// DpID The numeric data-point ID.
+	DpID int `json:"dp_id"`
+
+	// Time When the value was last reported, in milliseconds since the Unix epoch.
+	Time int64 `json:"time"`
+
+	// Type One of value, enum, bool, string, raw or bitmap.
+	Type string `json:"type"`
+
+	// Value The raw JSON value; number, boolean or string.
+	Value json.RawMessage `json:"value"`
+}
+
+// ShadowProperties The payload of getShadowProperties.
+type ShadowProperties struct {
+	Properties []Property `json:"properties"`
+}
+
 // Specification The data points a product can report and accept, with the metadata
 // needed to interpret them.
 type Specification struct {

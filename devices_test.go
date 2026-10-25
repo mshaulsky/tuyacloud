@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClientDevices(t *testing.T) {
@@ -328,6 +329,62 @@ func TestClientDevicesStatus(t *testing.T) {
 	}
 }
 
+func TestClientShadowProperties(t *testing.T) {
+	pinClock(t)
+
+	tests := []struct {
+		name      string
+		platform  *platform
+		want      []Property
+		wantCalls []call
+		wantErr   string
+	}{
+		{
+			name: "returns the data points with their report times",
+			platform: &platform{handler: jsonHandler(`{"success":true,"result":{"properties":[
+				{"code":"temp_current","custom_name":"","dp_id":1,"time":1792942313067,"type":"value","value":248},
+				{"code":"humidity_value","custom_name":"","dp_id":2,"time":1792943300632,"type":"value","value":46},
+				{"code":"battery_percentage","custom_name":"","dp_id":4,"time":1792942096804,"type":"value","value":66},
+				{"code":"temp_unit_convert","custom_name":"","dp_id":9,"time":1792942096804,"type":"enum","value":"c"}
+			]}}`)},
+			want: []Property{
+				{Code: "temp_current", DpID: 1, Time: 1792942313067, Type: "value", Value: json.RawMessage("248")},
+				{Code: "humidity_value", DpID: 2, Time: 1792943300632, Type: "value", Value: json.RawMessage("46")},
+				{Code: "battery_percentage", DpID: 4, Time: 1792942096804, Type: "value", Value: json.RawMessage("66")},
+				{Code: "temp_unit_convert", DpID: 9, Time: 1792942096804, Type: "enum", Value: json.RawMessage(`"c"`)},
+			},
+			wantCalls: []call{{method: http.MethodGet, path: "/v2.0/cloud/thing/dev1/shadow/properties"}},
+		},
+		{
+			name:     "a failure names the device",
+			platform: &platform{handler: jsonHandler(`{"success":false,"code":1000,"msg":"device not exist"}`)},
+			wantErr:  "get shadow of device dev1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, p := newPlatform(t, tt.platform)
+
+			got, err := c.ShadowProperties(t.Context(), "dev1")
+			if !checkErr(t, err, tt.wantErr) {
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d properties, want %d: %+v", len(got), len(tt.want), got)
+			}
+			for i, want := range tt.want {
+				g := got[i]
+				if g.Code != want.Code || g.CustomName != want.CustomName || g.DpID != want.DpID ||
+					g.Time != want.Time || g.Type != want.Type || string(g.Value) != string(want.Value) {
+					t.Errorf("property %d = %+v, want %+v", i, g, want)
+				}
+			}
+			assertCalls(t, p.requests(false), tt.wantCalls)
+		})
+	}
+}
+
 func TestClientSpecification(t *testing.T) {
 	pinClock(t)
 
@@ -573,6 +630,27 @@ func TestDataPointText(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Errorf("Text() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPropertyAt(t *testing.T) {
+	tests := []struct {
+		name string
+		ms   int64
+		want time.Time
+	}{
+		{name: "a millisecond stamp", ms: 1792942313067, want: time.UnixMilli(1792942313067)},
+		{name: "zero is no time", ms: 0, want: time.Time{}},
+		{name: "a negative stamp is no time", ms: -1, want: time.Time{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := Property{Time: tt.ms}
+			if got := p.At(); !got.Equal(tt.want) {
+				t.Errorf("At() = %v, want %v", got, tt.want)
 			}
 		})
 	}

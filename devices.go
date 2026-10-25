@@ -8,10 +8,11 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"time"
 )
 
-// The wire models — Device, DataPoint, Specification, Definition, Command,
-// Token and the page wrappers — are generated into types_gen.go from
+// The wire models — Device, DataPoint, Property, Specification, Definition,
+// Command, Token and the page wrappers — are generated into types_gen.go from
 // openapi.yaml, the package's specification of the Tuya endpoints it uses.
 // This file adds the behaviour on top of them.
 
@@ -137,6 +138,17 @@ func (c *Client) DevicesStatus(ctx context.Context, deviceIDs ...string) (map[st
 	return all, nil
 }
 
+// ShadowProperties reads every data point of a device with the time it was last
+// reported. The shadow speaks the product's own codes, not the standard set.
+func (c *Client) ShadowProperties(ctx context.Context, deviceID string) ([]Property, error) {
+	var shadow ShadowProperties
+	path := "/v2.0/cloud/thing/" + url.PathEscape(deviceID) + "/shadow/properties"
+	if err := c.Get(ctx, path, nil, &shadow); err != nil {
+		return nil, fmt.Errorf("tuyacloud: get shadow of device %s: %w", deviceID, err)
+	}
+	return shadow.Properties, nil
+}
+
 // Specification describes what a device can report and accept. It rarely
 // changes, so fetch it once and cache it: it carries the scale needed to turn
 // raw integers into real units.
@@ -204,6 +216,15 @@ func (d DataPoint) Text() (string, error) {
 		return "", fmt.Errorf("data point %s: not a string (%s): %w", d.Code, d.Value, err)
 	}
 	return v, nil
+}
+
+// At returns when the data point was last reported, or the zero time when the
+// platform gave no time.
+func (p *Property) At() time.Time {
+	if p.Time <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(p.Time)
 }
 
 // Get returns the definition with the given code, searching the readable data
